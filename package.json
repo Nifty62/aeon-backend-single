@@ -3,9 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "description": "AEON app with Vercel serverless backend.",
-  "scripts": {
-    "build": "tsc --project tsconfig.backend.json"
-  },
   "dependencies": {
     "@google/genai": "^1.22.0",
     "cors": "^2.8.5",
