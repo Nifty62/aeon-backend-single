@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "outDir": ".vercel/output/functions/api",
+    "noEmit": false,
+    "isolatedModules": false
+  },
+  "include": ["api/**/*.ts"]
+}
