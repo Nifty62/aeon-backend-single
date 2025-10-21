@@ -193,9 +193,9 @@ app.use(cors({ origin: 'http://localhost:3000' }));
 app.use(express.json());
 
 app.get('/analyze', async (req: express.Request, res: express.Response) => {
-    if (process.env.CRON_SECRET && req.headers['authorization'] !== `Bearer ${process.env.CRON_SECRET}`) {
-        return res.status(401).send('Unauthorized');
-    }
+    // if (process.env.CRON_SECRET && req.headers['authorization'] !== `Bearer ${process.env.CRON_SECRET}`) {
+    //     return res.status(401).send('Unauthorized');
+    // }
     res.status(202).send('Analysis job started.');
     await performFullAnalysis();
 });
