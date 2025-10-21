@@ -5,17 +5,14 @@ import mongoose, { Schema, Document, Model } from 'mongoose';
 import puppeteer from 'puppeteer';
 import { GoogleGenAI } from "@google/genai";
 
-// --- 1. STATE & CONFIGURATION ---
-
-const analysisState = {
-    isRunning: false,
-    progressMessage: 'Idle',
-    startTime: 0,
-};
+// --- CONFIGURATION ---
 
 const { MONGODB_URI, API_KEY, ALPHA_VANTAGE_API_KEY } = process.env;
 if (!MONGODB_URI || !API_KEY || !ALPHA_VANTAGE_API_KEY) {
-    throw new Error("Missing MONGODB_URI, API_KEY, or ALPHA_VANTAGE_API_KEY in environment variables.");
+    // Log the error for debugging on Vercel, but don't throw to prevent cron from being marked as failed instantly.
+    console.error("CRITICAL ERROR: Missing MONGODB_URI, API_KEY, or ALPHA_VANTAGE_API_KEY in environment variables.");
+    // Exit gracefully if essential variables are missing.
+    process.exit(0);
 }
 
 const ai = new GoogleGenAI({ apiKey: API_KEY });
@@ -49,10 +46,9 @@ const PROMPTS = {
 };
 const VALID_BIAS_VALUES = ["Very Bullish", "Bullish", "Neutral", "Bearish", "Very Bearish"];
 
-// --- 2. DATABASE SETUP ---
+// --- DATABASE SETUP ---
 mongoose.set('strictQuery', true);
 
-// Schemas for the 'analyses' collection
 const ScoreSchema = new Schema({ score: { type: Number, required: true }, rationale: { type: String, required: true } }, { _id: false });
 const EventModifierSchema = new Schema({ heading: String, flag: String, description: String }, { _id: false });
 const EconomicRecapSchema = new Schema({ bias: String, narrativeReasoning: String, eventModifiers: [EventModifierSchema] }, { _id: false });
@@ -61,36 +57,27 @@ interface IAnalysis extends Document { date: string; data: Map<string, any>; }
 const AnalysisSchema = new Schema<IAnalysis>({ date: { type: String, required: true, unique: true, index: true }, data: { type: Map, of: CurrencyAnalysisSchema } });
 const Analysis: Model<IAnalysis> = mongoose.models.Analysis || mongoose.model<IAnalysis>('Analysis', AnalysisSchema);
 
-// Schema for the 'overrides' collection
 interface IOverride extends Document {
-    timestamp: Date;
-    type: 'score' | 'bias';
-    currencyCode: string;
-    indicator?: string;
-    originalValue: string | number;
-    overriddenValue: string | number;
-    justification?: string;
+    timestamp: Date; type: 'score' | 'bias'; currencyCode: string; indicator?: string;
+    originalValue: string | number; overriddenValue: string | number; justification?: string;
 }
 const OverrideSchema = new Schema<IOverride>({
-    timestamp: { type: Date, default: Date.now },
-    type: { type: String, enum: ['score', 'bias'], required: true },
-    currencyCode: { type: String, required: true },
-    indicator: { type: String },
-    originalValue: { type: Schema.Types.Mixed, required: true },
-    overriddenValue: { type: Schema.Types.Mixed, required: true },
+    timestamp: { type: Date, default: Date.now }, type: { type: String, enum: ['score', 'bias'], required: true },
+    currencyCode: { type: String, required: true }, indicator: { type: String },
+    originalValue: { type: Schema.Types.Mixed, required: true }, overriddenValue: { type: Schema.Types.Mixed, required: true },
     justification: { type: String },
 });
 const Override: Model<IOverride> = mongoose.models.Override || mongoose.model<IOverride>('Override', OverrideSchema);
 
 const connectDB = async () => { if (mongoose.connection.readyState === 0) { await mongoose.connect(MONGODB_URI); } };
 
-// --- 3. CORE LOGIC ---
+// --- CORE LOGIC ---
 const cleanHtml = (html: string): string => html.replace(/<style[^>]*>.*<\/style>/gs, '').replace(/<script[^>]*>.*<\/script>/gs, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 
 async function scrapeUrl(url: string): Promise<string> {
     let browser;
     try {
-        analysisState.progressMessage = `Scraping: ${new URL(url).hostname}`;
+        console.log(`Scraping: ${new URL(url).hostname}`);
         browser = await puppeteer.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox'] });
         const page = await browser.newPage(); await page.goto(url, { waitUntil: 'networkidle2' });
         const content = await page.content(); await browser.close();
@@ -136,7 +123,7 @@ const analyzeTrend = (data: IndicatorDataPoint[]) => {
     return 'Neutral';
 };
 async function fetchAndAnalyzeRiskSentiment(): Promise<number> {
-    analysisState.progressMessage = 'Analyzing market risk sentiment...';
+    console.log('Analyzing market risk sentiment...');
     try {
         const [spxData, vixData, audjpyData, us10yData] = await Promise.all([
             fetchAlphaVantage(new URLSearchParams({ function: 'TIME_SERIES_DAILY', symbol: 'SPY', outputsize: 'compact' })).then(d => Object.entries(d['Time Series (Daily)']).map(([date, v]: [string, any]) => ({ date, value: parseFloat(v['4. close']) })).reverse()),
@@ -149,20 +136,21 @@ async function fetchAndAnalyzeRiskSentiment(): Promise<number> {
         const summary = { on: signals.filter(s => s === 'Risk-On').length, off: signals.filter(s => s === 'Risk-Off').length };
         if (summary.on >= 3) return 1; if (summary.off >= 3) return -1;
         return 0;
-    } catch (error) { console.error("Failed to analyze risk sentiment:", error); analysisState.progressMessage = 'Risk analysis failed, using Neutral.'; return 0; }
+    } catch (error) { console.error("Failed to analyze risk sentiment:", error); return 0; }
 }
 
-async function performFullAnalysis(currenciesToAnalyze: string[]) {
+async function performFullAnalysis() {
+    console.log('Starting scheduled analysis run...');
     try {
         const [riskModifier, eventStreamContent] = await Promise.all([ fetchAndAnalyzeRiskSentiment(), scrapeUrl("https://tradingeconomics.com/ws/stream.ashx?start=0&size=20") ]);
         const fullAnalysisData: any = {};
-        for (const currency of currenciesToAnalyze) {
-            analysisState.progressMessage = `Analyzing ${currency}...`;
+        for (const currency of CURRENCIES) {
+            console.log(`Analyzing ${currency}...`);
             const indicatorScores: any = {};
             for (const indicator of Object.keys(SCORING_RULES)) {
                 const sources = SOURCE_CONFIG[currency]?.[indicator] || [];
                 if (sources.length === 0) continue;
-                analysisState.progressMessage = `Analyzing ${currency} - ${indicator}`;
+                console.log(`Analyzing ${currency} - ${indicator}`);
                 const scrapedContents = await Promise.all(sources.map(scrapeUrl));
                 const combinedContent = scrapedContents.join('\n\n').substring(0, 15000);
                 if (!combinedContent.trim()) continue;
@@ -174,54 +162,52 @@ async function performFullAnalysis(currenciesToAnalyze: string[]) {
                 } catch (error) { console.error(`Failed to analyze ${currency} - ${indicator}:`, error); }
             }
             
-            // Corrected Base Score Calculation
             const pmiScores = [indicatorScores['Manufacturing PMI']?.score, indicatorScores['Services PMI']?.score].filter(s => typeof s === 'number') as number[];
             const pmiAverage = pmiScores.length > 0 ? pmiScores.reduce((a, b) => a + b, 0) / pmiScores.length : 0;
             let otherScoresSum = 0;
             for (const indicator in indicatorScores) {
-                if (indicator !== 'Manufacturing PMI' && indicator !== 'Services PMI') {
-                    otherScoresSum += indicatorScores[indicator]?.score || 0;
-                }
+                if (indicator !== 'Manufacturing PMI' && indicator !== 'Services PMI') { otherScoresSum += indicatorScores[indicator]?.score || 0; }
             }
             const baseScore = Math.round(pmiAverage + otherScoresSum);
             
             fullAnalysisData[currency] = { scores: indicatorScores, baseScore, direction: baseScore > 0 ? 'Bullish' : baseScore < 0 ? 'Bearish' : 'Neutral', riskModifier, eventModifierScore: 0 };
             
             try {
-                analysisState.progressMessage = `Generating recap for ${currency}`;
+                console.log(`Generating recap for ${currency}`);
                 const recapPrompt = PROMPTS.recap(currency, JSON.stringify(indicatorScores), eventStreamContent);
                 const recapResult = await callAI(recapPrompt);
                 fullAnalysisData[currency].recap = recapResult;
             } catch (error) { console.error(`Failed to generate recap for ${currency}:`, error); }
         }
-        analysisState.progressMessage = 'Saving results to database...';
+        console.log('Saving results to database...');
         await connectDB();
         const today = new Date().toISOString().split('T')[0];
         await Analysis.findOneAndUpdate({ date: today }, { data: fullAnalysisData }, { upsert: true, new: true });
         console.log("Analysis run completed successfully.");
     } catch (error) {
         console.error("A critical error occurred during the analysis run:", error);
-    } finally {
-        analysisState.isRunning = false;
-        analysisState.progressMessage = 'Idle';
     }
 }
 
-// --- 4. API ENDPOINTS ---
+// --- API ENDPOINTS ---
 const app = express(); app.use(cors()); app.use(express.json());
 
-app.all('/api/analyze', (req: Request, res: Response) => {
-    if (analysisState.isRunning) { return res.status(409).json({ message: 'An analysis is already in progress.', startTime: analysisState.startTime }); }
-    const currenciesToRun = req.body.currencies || CURRENCIES;
-    analysisState.isRunning = true; analysisState.startTime = Date.now(); analysisState.progressMessage = 'Starting analysis...';
-    res.status(202).json({ message: 'Analysis started.', currencies: currenciesToRun });
-    performFullAnalysis(currenciesToRun);
+// Endpoint for Vercel Cron Job
+app.get('/api/analyze', async (req: Request, res: Response) => {
+    // A simple check to prevent abuse, though not perfectly secure.
+    // Vercel Cron jobs add a secret to the headers.
+    if (process.env.CRON_SECRET && req.headers['authorization'] !== `Bearer ${process.env.CRON_SECRET}`) {
+        return res.status(401).send('Unauthorized');
+    }
+    
+    // Respond immediately to the cron trigger
+    res.status(202).send('Analysis job started.');
+    
+    // Start the long-running job without awaiting it
+    await performFullAnalysis();
 });
 
-app.get('/api/analyze/status', (req: Request, res: Response) => {
-    res.status(200).json({ isRunning: analysisState.isRunning, progressMessage: analysisState.progressMessage, elapsedTime: analysisState.isRunning ? Math.round((Date.now() - analysisState.startTime) / 1000) : 0 });
-});
-
+// Endpoint to get the latest analysis data
 app.get('/api/analyze/latest', async (req: Request, res: Response) => {
     try {
         await connectDB(); const latestAnalysis = await Analysis.findOne().sort({ date: -1 });
@@ -230,6 +216,7 @@ app.get('/api/analyze/latest', async (req: Request, res: Response) => {
     } catch (error) { res.status(500).json({ message: 'Failed to fetch latest analysis.', error: (error as Error).message }); }
 });
 
+// Endpoint to get all historical data for charts
 app.get('/api/analyze/historical', async (req: Request, res: Response) => {
     try {
         await connectDB(); const historicalData = await Analysis.find().sort({ date: 1 });
@@ -237,6 +224,7 @@ app.get('/api/analyze/historical', async (req: Request, res: Response) => {
     } catch (error) { res.status(500).json({ message: 'Failed to fetch historical data.', error: (error as Error).message }); }
 });
 
+// Endpoint to log user overrides
 app.post('/api/override', async (req: Request, res: Response) => {
     try {
         const { type, currencyCode, indicator, originalValue, overriddenValue, justification } = req.body;
@@ -258,15 +246,9 @@ app.post('/api/override', async (req: Request, res: Response) => {
 
         await connectDB();
         const newOverride = new Override({
-            type,
-            currencyCode,
-            indicator,
-            originalValue,
-            overriddenValue,
-            justification,
+            type, currencyCode, indicator, originalValue, overriddenValue, justification,
         });
         await newOverride.save();
-
         res.status(201).json({ message: 'Override logged successfully.' });
     } catch (error) {
         console.error("Error logging override:", error);
