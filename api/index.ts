@@ -190,7 +190,7 @@ async function performFullAnalysis() {
 // --- API ENDPOINTS ---
 const app = express(); app.use(cors()); app.use(express.json());
 
-// ** FIX: Routes updated to remove '/api' prefix **
+// Endpoint for Vercel Cron Job
 app.get('/analyze', async (req: express.Request, res: express.Response) => {
     if (process.env.CRON_SECRET && req.headers['authorization'] !== `Bearer ${process.env.CRON_SECRET}`) {
         return res.status(401).send('Unauthorized');
@@ -199,6 +199,7 @@ app.get('/analyze', async (req: express.Request, res: express.Response) => {
     await performFullAnalysis();
 });
 
+// Endpoint to get the latest analysis data
 app.get('/analyze/latest', async (req: express.Request, res: express.Response) => {
     try {
         await connectDB(); const latestAnalysis = await Analysis.findOne().sort({ date: -1 });
@@ -207,6 +208,7 @@ app.get('/analyze/latest', async (req: express.Request, res: express.Response) =
     } catch (error) { res.status(500).json({ message: 'Failed to fetch latest analysis.', error: (error as Error).message }); }
 });
 
+// Endpoint to get all historical data for charts
 app.get('/analyze/historical', async (req: express.Request, res: express.Response) => {
     try {
         await connectDB(); const historicalData = await Analysis.find().sort({ date: 1 });
@@ -214,6 +216,7 @@ app.get('/analyze/historical', async (req: express.Request, res: express.Respons
     } catch (error) { res.status(500).json({ message: 'Failed to fetch historical data.', error: (error as Error).message }); }
 });
 
+// Endpoint to log user overrides
 app.post('/override', async (req: express.Request, res: express.Response) => {
     try {
         const { type, currencyCode, indicator, originalValue, overriddenValue, justification } = req.body;
