@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import express, { Request, Response } from 'express';
+import express from 'express';
 import cors from 'cors';
 import mongoose, { Schema, Document, Model } from 'mongoose';
 import puppeteer from 'puppeteer';
@@ -9,9 +9,7 @@ import { GoogleGenAI } from "@google/genai";
 
 const { MONGODB_URI, API_KEY, ALPHA_VANTAGE_API_KEY } = process.env;
 if (!MONGODB_URI || !API_KEY || !ALPHA_VANTAGE_API_KEY) {
-    // Log the error for debugging on Vercel, but don't throw to prevent cron from being marked as failed instantly.
     console.error("CRITICAL ERROR: Missing MONGODB_URI, API_KEY, or ALPHA_VANTAGE_API_KEY in environment variables.");
-    // Exit gracefully if essential variables are missing.
     process.exit(0);
 }
 
@@ -192,23 +190,16 @@ async function performFullAnalysis() {
 // --- API ENDPOINTS ---
 const app = express(); app.use(cors()); app.use(express.json());
 
-// Endpoint for Vercel Cron Job
-app.get('/api/analyze', async (req: Request, res: Response) => {
-    // A simple check to prevent abuse, though not perfectly secure.
-    // Vercel Cron jobs add a secret to the headers.
+// ** FIX: Routes updated to remove '/api' prefix **
+app.get('/analyze', async (req: express.Request, res: express.Response) => {
     if (process.env.CRON_SECRET && req.headers['authorization'] !== `Bearer ${process.env.CRON_SECRET}`) {
         return res.status(401).send('Unauthorized');
     }
-    
-    // Respond immediately to the cron trigger
     res.status(202).send('Analysis job started.');
-    
-    // Start the long-running job without awaiting it
     await performFullAnalysis();
 });
 
-// Endpoint to get the latest analysis data
-app.get('/api/analyze/latest', async (req: Request, res: Response) => {
+app.get('/analyze/latest', async (req: express.Request, res: express.Response) => {
     try {
         await connectDB(); const latestAnalysis = await Analysis.findOne().sort({ date: -1 });
         if (!latestAnalysis) { return res.status(404).json({ message: 'No analysis data found.' }); }
@@ -216,16 +207,14 @@ app.get('/api/analyze/latest', async (req: Request, res: Response) => {
     } catch (error) { res.status(500).json({ message: 'Failed to fetch latest analysis.', error: (error as Error).message }); }
 });
 
-// Endpoint to get all historical data for charts
-app.get('/api/analyze/historical', async (req: Request, res: Response) => {
+app.get('/analyze/historical', async (req: express.Request, res: express.Response) => {
     try {
         await connectDB(); const historicalData = await Analysis.find().sort({ date: 1 });
         res.status(200).json(historicalData.map(doc => ({ date: doc.date, data: doc.data })));
     } catch (error) { res.status(500).json({ message: 'Failed to fetch historical data.', error: (error as Error).message }); }
 });
 
-// Endpoint to log user overrides
-app.post('/api/override', async (req: Request, res: Response) => {
+app.post('/override', async (req: express.Request, res: express.Response) => {
     try {
         const { type, currencyCode, indicator, originalValue, overriddenValue, justification } = req.body;
 
