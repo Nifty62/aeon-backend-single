@@ -209,7 +209,8 @@ async function performFullAnalysis(currenciesToAnalyze: string[]) {
 
 // --- 4. API ENDPOINTS ---
 const app = express(); app.use(cors()); app.use(express.json());
-app.post('/api/analyze', (req: Request, res: Response) => {
+
+app.all('/api/analyze', (req: Request, res: Response) => {
     if (analysisState.isRunning) { return res.status(409).json({ message: 'An analysis is already in progress.', startTime: analysisState.startTime }); }
     const currenciesToRun = req.body.currencies || CURRENCIES;
     analysisState.isRunning = true; analysisState.startTime = Date.now(); analysisState.progressMessage = 'Starting analysis...';

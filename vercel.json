@@ -3,5 +3,11 @@
     "api/index.ts": {
       "memory": 1024
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/analyze",
+      "schedule": "0 */6 * * *"
+    }
+  ]
 }
