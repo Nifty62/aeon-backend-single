@@ -45,22 +45,48 @@ const SCORING_RULES: { [indicator: string]: string[] } = {
 };
 const PROMPTS = {
     scoring: (indicator: string, currency: string, rules: string, data: string) => `Analyze the economic data for ${currency} regarding "${indicator}". Based on the rules and data, determine a score from -2 to +2. Respond ONLY with a valid JSON object: {"score": <number>, "rationale": "<brief reasoning>"}. \n\nRules: ${rules}\n\nData: ${data}`,
-    recap: (currency: string, indicatorData: string, eventsStream: string) => `Analyze the scored data for ${currency}: ${indicatorData}. Also consider the following live economic events stream for context: ${eventsStream}. Provide an economic recap. Respond ONLY with a valid JSON object: {"bias": "<string>", "narrativeReasoning": "<string>", "scoreModifier": <number, either -1, 0, or 1>, "modifierRecommendation": "<string, brief reasoning for modifier>", "eventModifiers": [{"heading": "<string>", "flag": "<'Green Flag'|'Yellow Flag'|'Red Flag'>", "description": "<string>"}]}`,
+    recap: (currency: string, indicatorData: string, eventsStream: string) => `Analyze the scored data for ${currency}: ${indicatorData}. Also consider the following live economic events stream for context: ${eventsStream}. Provide an economic recap. Respond ONLY with a valid JSON object: {"bias": "<string>", "narrativeReasoning": "<string>", "eventModifiers": [{"heading": "<string>", "flag": "<'Green Flag'|'Yellow Flag'|'Red Flag'>", "description": "<string>"}]}`,
 };
+const VALID_BIAS_VALUES = ["Very Bullish", "Bullish", "Neutral", "Bearish", "Very Bearish"];
 
 // --- 2. DATABASE SETUP ---
 mongoose.set('strictQuery', true);
+
+// Schemas for the 'analyses' collection
 const ScoreSchema = new Schema({ score: { type: Number, required: true }, rationale: { type: String, required: true } }, { _id: false });
 const EventModifierSchema = new Schema({ heading: String, flag: String, description: String }, { _id: false });
-const EconomicRecapSchema = new Schema({ bias: String, narrativeReasoning: String, scoreModifier: Number, modifierRecommendation: String, eventModifiers: [EventModifierSchema] }, { _id: false });
-const CurrencyAnalysisSchema = new Schema({ scores: { type: Map, of: ScoreSchema }, sigmaScore: Number, direction: String, recap: EconomicRecapSchema, eventModifierScore: { type: Number, default: 0 }, riskModifier: { type: Number, default: 0 } }, { _id: false });
+const EconomicRecapSchema = new Schema({ bias: String, narrativeReasoning: String, eventModifiers: [EventModifierSchema] }, { _id: false });
+const CurrencyAnalysisSchema = new Schema({ scores: { type: Map, of: ScoreSchema }, baseScore: Number, direction: String, recap: EconomicRecapSchema, eventModifierScore: { type: Number, default: 0 }, riskModifier: { type: Number, default: 0 } }, { _id: false });
 interface IAnalysis extends Document { date: string; data: Map<string, any>; }
 const AnalysisSchema = new Schema<IAnalysis>({ date: { type: String, required: true, unique: true, index: true }, data: { type: Map, of: CurrencyAnalysisSchema } });
 const Analysis: Model<IAnalysis> = mongoose.models.Analysis || mongoose.model<IAnalysis>('Analysis', AnalysisSchema);
+
+// Schema for the 'overrides' collection
+interface IOverride extends Document {
+    timestamp: Date;
+    type: 'score' | 'bias';
+    currencyCode: string;
+    indicator?: string;
+    originalValue: string | number;
+    overriddenValue: string | number;
+    justification?: string;
+}
+const OverrideSchema = new Schema<IOverride>({
+    timestamp: { type: Date, default: Date.now },
+    type: { type: String, enum: ['score', 'bias'], required: true },
+    currencyCode: { type: String, required: true },
+    indicator: { type: String },
+    originalValue: { type: Schema.Types.Mixed, required: true },
+    overriddenValue: { type: Schema.Types.Mixed, required: true },
+    justification: { type: String },
+});
+const Override: Model<IOverride> = mongoose.models.Override || mongoose.model<IOverride>('Override', OverrideSchema);
+
 const connectDB = async () => { if (mongoose.connection.readyState === 0) { await mongoose.connect(MONGODB_URI); } };
 
 // --- 3. CORE LOGIC ---
 const cleanHtml = (html: string): string => html.replace(/<style[^>]*>.*<\/style>/gs, '').replace(/<script[^>]*>.*<\/script>/gs, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+
 async function scrapeUrl(url: string): Promise<string> {
     let browser;
     try {
@@ -75,8 +101,6 @@ async function scrapeUrl(url: string): Promise<string> {
 async function callAI(prompt: string): Promise<any> {
     try {
         const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt, config: { responseMimeType: "application/json" } });
-        
-        // ** FIX STARTS HERE **
         const text = response.text;
         if (!text) {
             const finishReason = response.candidates?.[0]?.finishReason;
@@ -84,14 +108,9 @@ async function callAI(prompt: string): Promise<any> {
             console.error("AI Response Error:", { finishReason, safetyRatings });
             throw new Error(`AI response was empty or blocked. Finish Reason: ${finishReason}`);
         }
-        // ** FIX ENDS HERE **
-        
         const cleanedText = text.replace(/^```json\n?/, '').replace(/\n?```$/, '');
         return JSON.parse(cleanedText);
-    } catch (error) { 
-        console.error("AI call failed:", error); 
-        throw new Error(`Failed to get a valid JSON response from AI. ${error instanceof Error ? error.message : ''}`); 
-    }
+    } catch (error) { console.error("AI call failed:", error); throw new Error(`Failed to get a valid JSON response from AI. ${error instanceof Error ? error.message : ''}`); }
 }
 
 type IndicatorDataPoint = { date: string; value: number; }; type RiskSignal = 'Risk-On' | 'Risk-Off' | 'Neutral';
@@ -125,15 +144,8 @@ async function fetchAndAnalyzeRiskSentiment(): Promise<number> {
             fetchAlphaVantage(new URLSearchParams({ function: 'FX_DAILY', from_symbol: 'AUD', to_symbol: 'JPY', outputsize: 'compact' })).then(d => Object.entries(d['Time Series FX (Daily)']).map(([date, v]: [string, any]) => ({ date, value: parseFloat(v['4. close']) })).reverse()),
             fetchAlphaVantage(new URLSearchParams({ function: 'TREASURY_YIELD', interval: 'daily', maturity: '10year' })).then(d => d.data.map((item: any) => ({ date: item.date, value: parseFloat(item.value) })).filter((i: any) => !isNaN(i.value)).reverse()),
         ]);
-
         const latestVix = vixData[vixData.length - 1]?.value;
-        const signals: RiskSignal[] = [
-            analyzeTrend(spxData),
-            latestVix < 20 ? 'Risk-On' : latestVix > 25 ? 'Risk-Off' : 'Neutral',
-            analyzeTrend(audjpyData),
-            analyzeTrend(us10yData)
-        ];
-        
+        const signals: RiskSignal[] = [ analyzeTrend(spxData), latestVix < 20 ? 'Risk-On' : latestVix > 25 ? 'Risk-Off' : 'Neutral', analyzeTrend(audjpyData), analyzeTrend(us10yData) ];
         const summary = { on: signals.filter(s => s === 'Risk-On').length, off: signals.filter(s => s === 'Risk-Off').length };
         if (summary.on >= 3) return 1; if (summary.off >= 3) return -1;
         return 0;
@@ -146,7 +158,7 @@ async function performFullAnalysis(currenciesToAnalyze: string[]) {
         const fullAnalysisData: any = {};
         for (const currency of currenciesToAnalyze) {
             analysisState.progressMessage = `Analyzing ${currency}...`;
-            const indicatorScores: any = {}; let sigmaScore = 0; let validScoresCount = 0;
+            const indicatorScores: any = {};
             for (const indicator of Object.keys(SCORING_RULES)) {
                 const sources = SOURCE_CONFIG[currency]?.[indicator] || [];
                 if (sources.length === 0) continue;
@@ -159,18 +171,27 @@ async function performFullAnalysis(currenciesToAnalyze: string[]) {
                 try {
                     const result = await callAI(prompt);
                     indicatorScores[indicator] = result;
-                    sigmaScore += result.score;
-                    validScoresCount++;
                 } catch (error) { console.error(`Failed to analyze ${currency} - ${indicator}:`, error); }
             }
-            const averageScore = validScoresCount > 0 ? sigmaScore / validScoresCount : 0;
-            fullAnalysisData[currency] = { scores: indicatorScores, sigmaScore: averageScore, direction: averageScore > 0.5 ? 'Bullish' : averageScore < -0.5 ? 'Bearish' : 'Neutral', riskModifier, eventModifierScore: 0 };
+            
+            // Corrected Base Score Calculation
+            const pmiScores = [indicatorScores['Manufacturing PMI']?.score, indicatorScores['Services PMI']?.score].filter(s => typeof s === 'number') as number[];
+            const pmiAverage = pmiScores.length > 0 ? pmiScores.reduce((a, b) => a + b, 0) / pmiScores.length : 0;
+            let otherScoresSum = 0;
+            for (const indicator in indicatorScores) {
+                if (indicator !== 'Manufacturing PMI' && indicator !== 'Services PMI') {
+                    otherScoresSum += indicatorScores[indicator]?.score || 0;
+                }
+            }
+            const baseScore = Math.round(pmiAverage + otherScoresSum);
+            
+            fullAnalysisData[currency] = { scores: indicatorScores, baseScore, direction: baseScore > 0 ? 'Bullish' : baseScore < 0 ? 'Bearish' : 'Neutral', riskModifier, eventModifierScore: 0 };
+            
             try {
                 analysisState.progressMessage = `Generating recap for ${currency}`;
                 const recapPrompt = PROMPTS.recap(currency, JSON.stringify(indicatorScores), eventStreamContent);
                 const recapResult = await callAI(recapPrompt);
                 fullAnalysisData[currency].recap = recapResult;
-                fullAnalysisData[currency].eventModifierScore = recapResult.scoreModifier || 0;
             } catch (error) { console.error(`Failed to generate recap for ${currency}:`, error); }
         }
         analysisState.progressMessage = 'Saving results to database...';
@@ -195,9 +216,11 @@ app.post('/api/analyze', (req: Request, res: Response) => {
     res.status(202).json({ message: 'Analysis started.', currencies: currenciesToRun });
     performFullAnalysis(currenciesToRun);
 });
+
 app.get('/api/analyze/status', (req: Request, res: Response) => {
     res.status(200).json({ isRunning: analysisState.isRunning, progressMessage: analysisState.progressMessage, elapsedTime: analysisState.isRunning ? Math.round((Date.now() - analysisState.startTime) / 1000) : 0 });
 });
+
 app.get('/api/analyze/latest', async (req: Request, res: Response) => {
     try {
         await connectDB(); const latestAnalysis = await Analysis.findOne().sort({ date: -1 });
@@ -205,10 +228,49 @@ app.get('/api/analyze/latest', async (req: Request, res: Response) => {
         res.status(200).json(latestAnalysis.data);
     } catch (error) { res.status(500).json({ message: 'Failed to fetch latest analysis.', error: (error as Error).message }); }
 });
+
 app.get('/api/analyze/historical', async (req: Request, res: Response) => {
     try {
         await connectDB(); const historicalData = await Analysis.find().sort({ date: 1 });
         res.status(200).json(historicalData.map(doc => ({ date: doc.date, data: doc.data })));
     } catch (error) { res.status(500).json({ message: 'Failed to fetch historical data.', error: (error as Error).message }); }
 });
+
+app.post('/api/override', async (req: Request, res: Response) => {
+    try {
+        const { type, currencyCode, indicator, originalValue, overriddenValue, justification } = req.body;
+
+        if (!type || !currencyCode || originalValue === undefined || overriddenValue === undefined) {
+            return res.status(400).json({ message: 'Missing required fields: type, currencyCode, originalValue, overriddenValue.' });
+        }
+        if (type === 'score' && !indicator) {
+            return res.status(400).json({ message: 'Field "indicator" is required for a "score" override.' });
+        }
+        if (type === 'bias') {
+             if (typeof originalValue !== 'string' || typeof overriddenValue !== 'string' || !VALID_BIAS_VALUES.includes(overriddenValue)) {
+                return res.status(400).json({ message: 'Values for a "bias" override must be one of: ' + VALID_BIAS_VALUES.join(', ') });
+             }
+        }
+        if (type === 'score' && (typeof originalValue !== 'number' || typeof overriddenValue !== 'number')) {
+            return res.status(400).json({ message: 'Values for a "score" override must be numbers.' });
+        }
+
+        await connectDB();
+        const newOverride = new Override({
+            type,
+            currencyCode,
+            indicator,
+            originalValue,
+            overriddenValue,
+            justification,
+        });
+        await newOverride.save();
+
+        res.status(201).json({ message: 'Override logged successfully.' });
+    } catch (error) {
+        console.error("Error logging override:", error);
+        res.status(500).json({ message: 'Failed to log override.', error: (error as Error).message });
+    }
+});
+
 export default app;
