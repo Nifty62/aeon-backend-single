@@ -10,7 +10,6 @@ import { GoogleGenAI } from "@google/genai";
 const { MONGODB_URI, API_KEY, ALPHA_VANTAGE_API_KEY } = process.env;
 if (!MONGODB_URI || !API_KEY || !ALPHA_VANTAGE_API_KEY) {
     console.error("CRITICAL ERROR: Missing MONGODB_URI, API_KEY, or ALPHA_VANTAGE_API_KEY in environment variables.");
-    // Exit gracefully so Vercel doesn't mark the cron job as failed instantly.
     process.exit(0);
 }
 
@@ -193,7 +192,6 @@ const app = express();
 app.use(cors()); 
 app.use(express.json());
 
-// ** FIX: Routes updated to remove '/api' prefix **
 app.get('/analyze', async (req: express.Request, res: express.Response) => {
     if (process.env.CRON_SECRET && req.headers['authorization'] !== `Bearer ${process.env.CRON_SECRET}`) {
         return res.status(401).send('Unauthorized');
