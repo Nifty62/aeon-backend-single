@@ -1,13 +1,20 @@
 {
   "functions": {
     "api/index.ts": {
-      "memory": 1024
+      "memory": 1024,
+      "maxDuration": 300
     }
   },
   "crons": [
     {
       "path": "/api/analyze",
-      "schedule": "0 */6 * * *"
+      "schedule": "0 0 * * *"
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "/api/index.ts"
     }
   ]
 }
